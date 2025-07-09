@@ -1,0 +1,33 @@
+# Файл конфигурации для Render.
+# Этот файл автоматически создаст веб-сервис для бота и базу данных.
+
+services:
+  # Веб-сервис для запуска Python-кода бота
+  - type: web
+    name: bronhitik-bot
+    # Указываем, что бот должен запускаться в среде Python 3
+    env: python
+    # Команда для установки зависимостей из requirements.txt
+    buildCommand: "pip install -r requirements.txt"
+    # Команда для запуска основного файла бота
+    startCommand: "python main.py"
+    # Переменные окружения
+    envVars:
+      - key: DATABASE_URL
+        # Эта специальная переменная автоматически возьмет URL из созданной ниже базы данных
+        fromDatabase:
+          name: bronhitik-db
+          property: connectionString
+      - key: PYTHON_VERSION
+        value: 3.10.6
+      # ВАЖНО: Добавьте TELEGRAM_BOT_TOKEN и OPENAI_API_KEY
+      # вручную в разделе Environment на дашборде Render.
+
+  # База данных PostgreSQL для хранения истории чатов
+  - type: psql
+    name: bronhitik-db
+    # Указываем версию PostgreSQL
+    postgresMajorVersion: 14
+    # Используем бесплатный план. Внимание: данные на бесплатном плане
+    # могут быть удалены через 90 дней неактивности.
+    plan: free
