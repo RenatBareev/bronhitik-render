@@ -24,7 +24,7 @@ services:
       # вручную в разделе Environment на дашборде Render.
 
   # База данных PostgreSQL для хранения истории чатов
-  - type: postgres # ИСПРАВЛЕНО: psql -> postgres
+  - type: psql # ИСПРАВЛЕНО: Возвращаем правильный тип 'psql'
     name: bronhitik-db
     # Указываем версию PostgreSQL
     postgresMajorVersion: 14
