@@ -1,24 +1,25 @@
 import os
 import telebot
-import openai
+import google.generativeai as genai
 import psycopg2
 from psycopg2 import sql
 
 # --- НАСТРОЙКА ---
 # Получаем секретные ключи из переменных окружения на Render
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") # ИЗМЕНЕНО: Используем ключ Gemini
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 # Проверяем, что все ключи доступны
-if not all([TELEGRAM_BOT_TOKEN, OPENAI_API_KEY, DATABASE_URL]):
+if not all([TELEGRAM_BOT_TOKEN, GEMINI_API_KEY, DATABASE_URL]):
     raise ValueError("Один или несколько секретных ключей не установлены в переменных окружения.")
 
-# Инициализация OpenAI и Telegram Bot
-openai.api_key = OPENAI_API_KEY
+# Инициализация Gemini AI и Telegram Bot
+genai.configure(api_key=GEMINI_API_KEY)
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
+model = genai.GenerativeModel('gemini-pro')
 
-# --- РАБОТА С БАЗОЙ ДАННЫХ ---
+# --- РАБОТА С БАЗОЙ ДАННЫХ (без изменений) ---
 
 def get_db_connection():
     """Устанавливает соединение с базой данных PostgreSQL."""
@@ -37,7 +38,6 @@ def init_db():
 
     try:
         with conn.cursor() as cur:
-            # Создаем таблицу для пользователей
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     user_id BIGINT PRIMARY KEY,
@@ -46,7 +46,6 @@ def init_db():
                     registration_date TIMESTAMP WITH TIME ZONE DEFAULT (NOW() AT TIME ZONE 'utc')
                 );
             """)
-            # Создаем таблицу для истории чатов
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS chat_history (
                     id SERIAL PRIMARY KEY,
@@ -73,9 +72,7 @@ def add_user_to_db(message):
     username = message.from_user.username
 
     conn = get_db_connection()
-    if not conn:
-        return
-
+    if not conn: return
     try:
         with conn.cursor() as cur:
             cur.execute("""
@@ -88,35 +85,31 @@ def add_user_to_db(message):
     except Exception as e:
         print(f"Ошибка при добавлении пользователя {user_id}: {e}")
     finally:
-        if conn:
-            conn.close()
+        if conn: conn.close()
 
 
 def add_message_to_history(user_id, role, content):
     """Сохраняет сообщение в историю чата в базе данных."""
+    # Для Gemini роль ассистента - 'model'
+    role_to_save = 'model' if role == 'assistant' else role
     conn = get_db_connection()
-    if not conn:
-        return
-
+    if not conn: return
     try:
         with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO chat_history (user_id, role, content)
                 VALUES (%s, %s, %s);
-            """, (user_id, role, content))
+            """, (user_id, role_to_save, content))
         conn.commit()
     except Exception as e:
         print(f"Ошибка при сохранении сообщения для пользователя {user_id}: {e}")
     finally:
-        if conn:
-            conn.close()
+        if conn: conn.close()
 
 def get_user_history(user_id, limit=20):
-    """Получает последние сообщения пользователя из базы данных."""
+    """Получает последние сообщения пользователя из базы данных для Gemini."""
     conn = get_db_connection()
-    if not conn:
-        return []
-
+    if not conn: return []
     history = []
     try:
         with conn.cursor() as cur:
@@ -130,12 +123,13 @@ def get_user_history(user_id, limit=20):
                 ) AS recent_history
                 ORDER BY timestamp ASC;
             """, (user_id, limit))
-            history = [{"role": role, "content": content} for role, content in cur.fetchall()]
+            # Форматируем историю для Gemini
+            for role, content in cur.fetchall():
+                history.append({"role": role, "parts": [content]})
     except Exception as e:
         print(f"Ошибка при получении истории для пользователя {user_id}: {e}")
     finally:
-        if conn:
-            conn.close()
+        if conn: conn.close()
     return history
 
 
@@ -146,13 +140,10 @@ def send_welcome(message):
     """Обработчик команды /start."""
     add_user_to_db(message)
     welcome_text = (
-        "Привет! Я Bronhitik, ваш личный помощник на базе ChatGPT.\n\n"
-        "Просто задайте мне любой вопрос, и я постараюсь на него ответить.\n"
-        "Я помню контекст нашего разговора, так что мы можем вести полноценный диалог."
+        "Привет! Я Bronhitik, ваш личный помощник на базе Gemini.\n\n"
+        "Задайте мне любой вопрос, и я постараюсь на него ответить."
     )
     bot.reply_to(message, welcome_text)
-    # Очищаем историю при старте нового диалога (опционально)
-    # add_message_to_history(message.from_user.id, "system", "Новый диалог начат.")
 
 
 @bot.message_handler(func=lambda message: True)
@@ -161,34 +152,26 @@ def handle_message(message):
     user_id = message.from_user.id
     user_text = message.text
 
-    # Добавляем пользователя в БД на случай, если он не нажимал /start
     add_user_to_db(message)
-
-    # Сохраняем сообщение пользователя
     add_message_to_history(user_id, "user", user_text)
-
-    # Получаем историю диалога
-    conversation = get_user_history(user_id)
-
-    # Добавляем системное сообщение для задания контекста (опционально)
-    full_conversation = [{"role": "system", "content": "Ты — полезный ассистент по имени Bronhitik."}] + conversation
-
+    
+    conversation_history = get_user_history(user_id)
+    
     try:
-        # Отправляем запрос в OpenAI
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=full_conversation
-        )
-        ai_response = response.choices[0].message['content']
+        # Начинаем чат с моделью Gemini с полной историей
+        chat = model.start_chat(history=conversation_history)
+        # Отправляем последнее сообщение пользователя
+        response = chat.send_message(user_text)
+        
+        ai_response = response.text
 
-        # Сохраняем ответ ассистента
-        add_message_to_history(user_id, "assistant", ai_response)
+        # Сохраняем ответ ассистента в БД
+        add_message_to_history(user_id, "model", ai_response)
 
-        # Отправляем ответ пользователю
         bot.reply_to(message, ai_response)
 
     except Exception as e:
-        print(f"Ошибка при обращении к OpenAI: {e}")
+        print(f"Ошибка при обращении к Gemini API: {e}")
         bot.reply_to(message, "К сожалению, произошла ошибка. Попробуйте еще раз позже.")
 
 
@@ -196,5 +179,5 @@ def handle_message(message):
 if __name__ == '__main__':
     print("Инициализация базы данных...")
     init_db()
-    print("Запуск бота...")
+    print("Запуск Gemini бота...")
     bot.polling(none_stop=True)
